@@ -1,0 +1,81 @@
+---
+title: "Estimating hospital beds per 1000 people across California counties"
+output: html_document
+---
+
+In thinking about the covid-19 pandemic, one of the biggest concerns is running out of hospital beds. On average, the United States has 2.77 hospital beds per 1000 people. However, these beds are not distributed evenly across space. Thus, some regions potentially have less time between the start of an outbreak and their capacity being exceeded. As someone who cares about multiple people in high risk groups who live in California, I've been thinking a lot about infidivudal risk levels in different parts of the state. I was surprised that no maps of per-capita hospital bed count were easily googleable, so I made this one. Note that while I do have experience with spatial data analysis, I am not an epidemiologist or a public health expert. There could be nuances here that I'm missing (feel free to send me a pull request if you see any!). For that reason, I'm not going to try to draw any conclusions from this - I just want to put it out there in case it's useful to anyone else. 
+
+## Gathering data
+
+First we need to assemble data on hospital beds and population by county. We'll pull it from the USDA 2018 per-county population estimates (the most recent available) and the DHS listing of all hospitals and merge it together.
+
+```{r}
+library(ggplot2)
+library(dplyr)
+library(readr)
+library(maps)
+library(stringr)
+
+
+# Hospital data from: https://hifld-geoplatform.opendata.arcgis.com/datasets/hospitals  
+Hospitals <- read_csv("Hospitals.csv")
+# Population data from: https://www.ers.usda.gov/data-products/county-level-data-sets/download-data/
+PopulationEstimates <- read_csv("PopulationEstimates.csv")
+
+# -999 appears to be a sentinel value for medical facilities without beds - have to filter that out
+# and count up the number of actual beds per county
+# Possible types are: c("GENERAL ACUTE CARE", "PSYCHIATRIC", "CHILDREN", "LONG TERM CARE", "CRITICAL ACCESS", "REHABILITATION", "MILITARY", "WOMEN", "CHRONIC DISEASE", "SPECIAL")
+# As far as I can tell, only general aacute care and critical access are particularly helpful here.
+beds <- Hospitals %>% filter(BEDS > 0, STATUS == "OPEN", TYPE %in% c("CRITICAL ACCESS", "GENERAL ACUTE CARE")) %>% group_by(COUNTYFIPS) %>% summarise(beds = sum(BEDS))
+
+# Remove extraneous columns, rename FIPS column to simplify merge
+pop <- PopulationEstimates %>% transmute(COUNTYFIPS=FIPS, State=State, Area_Name = Area_Name, pop=POP_ESTIMATE_2018)
+
+# Merge and calculate per capita beds
+all_data <- merge(pop, beds)
+all_data <- all_data %>% mutate(percapitabeds = beds/pop)
+
+# Convert county and state names to facilitate merging with polygon data
+all_data <- all_data %>% mutate(region=str_to_lower(setNames(state.name, state.abb)[State]), subregion=str_to_lower(str_remove(Area_Name, " County")))
+
+# Get polygon data
+counties <- map_data("county")
+
+# Merge polygon data with beds/population data
+all_data_county <- merge(counties, all_data, all.x=TRUE)
+
+```
+
+## Plots
+
+Okay, first let's make sure it looks reasonable
+
+```{r}
+ggplot(data=all_data) + geom_histogram(aes(x=percapitabeds))
+```
+
+Seems plausible.
+
+Let's make a map of population to make sure it looks reasonable.
+
+```{r}
+ggplot() + coord_map() + geom_polygon( data=all_data_county %>% arrange(order) %>% filter(region %in% c("california")), aes(x=long, y=lat, group=group, fill=pop)) + scale_fill_continuous("Population", trans="log10", type="viridis") + theme_void()
+```
+
+This roughly tracks with my knowledge of California demography
+
+Let's go ahead and plot absolute number of hospital beds too, just so we have it.
+
+```{r}
+ggplot() + coord_map() + geom_polygon( data=all_data_county %>% arrange(order) %>% filter(region %in% c("california")), aes(x=long, y=lat, group=group, fill=beds)) + scale_fill_continuous("Hospital Beds", trans="log10", type="viridis") + theme_void()
+```
+
+Okay, lets actually plot beds per capita
+
+```{r}
+ggplot() + coord_map() + geom_polygon( data=all_data_county %>% arrange(order) %>% filter(region %in% c("california")), aes(x=long, y=lat, group=group, fill=percapitabeds*1000)) + scale_fill_continuous("Hospital beds per\n1000 people", trans="log10", type="viridis") + theme_void()
+```
+
+The gray county is Alpine county, which appears to legitimately not have any hospital beds (it's in the middle of the Sierras).
+
+Okay, some caveats: not all of these beds are intended for emergency infectious disease use. Some of them are in psych or maternity hospitals, for instance. Also, some are already in use at any given time. Also counties aren't necessarily the best geographic unit to be using here. They're weirdly shaped and don't necessarily reflect the locations people would go in an emergency. In an ideal world I would come up with some rolling mean across space of number of people vs. number of hospital beds within some radius. This is just intended to give a quick impression of regions that may be at increased risk of running out of hospital beds/quantify the extent to which that varies. Note also that I'm not an epidemiologist or a public health expert, so there could well be nuances here that I'm unaware of.
